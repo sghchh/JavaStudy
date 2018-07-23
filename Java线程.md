@@ -335,4 +335,151 @@ isInterrupted(boolean):带参数的方法，参数表示是否清除状态标识
 		1502463392035
 		停止
 		//然后就停止打印了  
-从我们以上实现中断的方法来看，中断了的线程和暂停时不一样的，中断了的线程是没法主动的进入到就绪或者运行态了，这算是**中断和暂停的区别来看待**  
+从我们以上实现中断的方法来看，中断了的线程和暂停时不一样的，中断了的线程是没法主动的进入到就绪或者运行态了，这算是**中断和暂停的区别来看待**    
+
+### 六、线程通信再学习  
+#### 6.1 轮询法  
+**Sleep+While(true):**  
+
+	final List<Integer> list = new ArrayList<Integer>();
+	Thread t1 = new Thread(new Runnable() {
+    	@Override
+    	public void run() {
+        	try {
+            	for (int i = 0 ; i < 6 ;i++){
+                	list.add(i);
+                	System.out.println("添加了" + (i+1) + "个元素");
+            	}
+            	Thread.sleep(1000);
+        	} catch (InterruptedException e) {
+            	e.printStackTrace();
+        	}
+    	}
+	},"sally");
+	Thread t2 = new Thread(new Runnable() {
+    	@Override
+    	public void run() {
+        	try {
+	            while (true){
+	                if (list.size() == 3){
+	                    System.out.println("已添加5个元素,kira线程需要退出");
+	                    throw new InterruptedException();
+	                }
+	            }
+	        } catch (InterruptedException e) {
+	            e.printStackTrace();//这里只是打印堆栈信息，不是真的停止执行
+        	}
+    	}
+	},"kira");
+	t1.start();
+	t2.start();
+	-------------
+	//输出：
+	添加了1个元素
+	添加了2个元素
+	添加了3个元素
+	已添加3个元素,kira线程需要退出
+	java.lang.InterruptedException
+	    at concurrent.Main$2.run(Main.java:98)
+	    at java.lang.Thread.run(Thread.java:748)
+	添加了4个元素
+	添加了5个元素
+	添加了6个元素  
+
+>分析：由于调用**sleep()方法**的线程不会释放任何监视器，所以如果while的条件是**临界区**的资源，那么该方法恐怕无法奏效；但是如果是普通的线程共享的资源(比如这里的list)，那么便能够实现效果，但是轮询的时间要把握恰当，否则造成时间的浪费、难以保证准时(时间过长)；或者是资源的浪费、开销的增大(轮询时间过短)。
+
+#### 6.2 Object.wait/Object.notify  
+![](http://static.zybuluo.com/kiraSally/w92amiesxtqq1jn9zlj08jzj/image_1bng05nfa14ij3as3eab3ode8l.png)  
+
+##### 6.2.1 Object.wait()方法  
+
+* wait方法**使当前线程进行阻塞等待**，该方法是Object类的方法，用来将当前线程**放入"等待队列"中**，并在wait所在的代码处停止执行，直到收到通知**被唤醒或被中断或超时**
+* **调用wait方法之前，线程必须获得该对象的对象级别锁**，即只能在同步方法或同步块中调用wait方法
+* 在执行wait方法后，**当前线程释放锁**，在从wait方法返回前，线程与其他线程竞争重新获得锁
+* 如果调用wait方法时没有持有适当的锁，则抛出运行期异常类IllegalMonitorStateException  
+
+##### 6.2.2 Object.notify()  
+
+* notify方法**使线程被唤醒**，该方法是Object类的方法，用来将当前线程**从"等待队列中"移出到"同步队列中"**，线程状态重新变成**阻塞状态**，notify方法所在同步块释放锁后，从wait方法返回继续执行
+* 调用notify方法之前，线程必须获得该对象的对象级别锁，即**只能在同步方法或同步块中调用notify方法**
+* 该方法用来通知那么可能等待该对象的对象锁的其他线程，如果有多个线程等待，则由线程规划器从等待队列中随机选择一个WAITING状态线程，对其发出通知转入同步队列并使它等待获取该对象的对象锁
+* 在执行notify方法之后，**当前线程不会马上释放对象锁**，等待线程也并不能马上获取该对象锁，需要等到执行notify方法的线程将程序执行完，即**退出同步代码块之后当前线程才能释放锁**，而等待线程才可以有机会获取该对象锁
+* 如果调用notify方法时没有持有适当的锁，则抛出运行期异常类IllegalMonitorStateException  
+
+##### 6.2.3 **等待/通知的经典范式（生产者-消费者模式）**  
+
+	final List<Integer> list = new ArrayList<Integer>();
+	Object lock = new Object();
+	Thread t1 = new Thread(new Runnable() {
+	    @Override
+	    public void run() {
+	        //加锁，拥有lock的Monitor
+	        //wait方法必须在synchronized方法或方法块中执行，否则抛出IllegalMonitorStateException
+	        synchronized (lock){
+	            System.out.println(Thread.currentThread().getName() + "线程开始执行");
+	            if (list.size() != 3){
+	                System.out.println("wait 开始:" + System.currentTimeMillis());
+	                try {
+	                    lock.wait();//将当前sally线程放入等待队列中，进入等待状态
+	                    System.out.println("wait 结束:" + System.currentTimeMillis());
+	                    System.out.println(Thread.currentThread().getName() + "线程结束执行");
+	                } catch (InterruptedException e) {
+	                    e.printStackTrace();
+	                }
+	            }
+	        }
+	    }
+	},"sally");
+	Thread t2 = new Thread(new Runnable() {
+	    @Override
+	    public void run() {
+	        //加锁，拥有lock的Monitor
+	        //notify方法必须在synchronized方法或方法块中执行，否则抛出IllegalMonitorStateException
+	        //由于wait方法会释放锁，所以kira线程可以获取到lock同步锁
+	        //同时notify方法不会释放锁，直到该同步块执行完毕
+	        synchronized (lock){
+	            try {
+	                System.out.println(Thread.currentThread().getName() + "线程开始执行");
+	                for (int i = 0; i< 6;i++){
+	                    list.add(i);
+	                    if (list.size() == 3){
+	                        System.out.println("notify 开始:" + System.currentTimeMillis());
+	                        //随机唤醒一个等待线程，这里因为就只有sally线程被等待，所有就唤醒它
+	                        lock.notify();
+	                        // lock.notifyAll(); 会一次性唤醒所有的等待线程
+	                        System.out.println("notify方法已执行，发出通知");
+	                    }
+	                    System.out.println("已添加" + ( i +1 ) + "个元素");
+	                    Thread.sleep(500);//为了让效果明显一些，我们先暂停500毫秒
+	                }
+	                System.out.println("notify 结束:" + System.currentTimeMillis());
+	                System.out.println(Thread.currentThread().getName() + "线程结束执行");
+	            } catch (InterruptedException e) {
+	                e.printStackTrace();
+	            }
+	        }
+	    }
+	},"kira");
+	t1.start();
+	t2.start();
+	-------------
+	//输出：
+	sally线程开始执行
+	wait 开始:1502699526681
+	执行wait方法    
+	kira线程开始执行 //注意：wait方法会释放锁，所有kira线程获得锁从而执行
+	已添加1个元素
+	已添加2个元素
+	notify 开始:1502699527682
+	notify已方法，发出通知
+	已添加3个元素
+	已添加4个元素
+	已添加5个元素
+	已添加6个元素 //注意：notify方法不会释放锁，直到该同步方法/块执行完毕才会释放锁
+	notify 结束:1502699529682
+	kira线程结束执行
+	wait 结束:1502699529682
+	sally线程结束执行  
+
+>join的源码非常简单，是用wait实现的；猜测：比如在main线程中新建一个t线程，调用t.join()，则对应的源码中wait()的调用者是main线程，而不是t线程。  
+
