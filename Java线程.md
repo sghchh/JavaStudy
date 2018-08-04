@@ -32,6 +32,8 @@ java线程转换图：
 * resume方法：  
     * 该方法是一个实例方法，可以让经过suspend方法暂停的线程重新恢复进入到就绪态
 
+> 注意到线程控制的解决方案都只是一种“主动停止”的思想：不管是sleep、yield、suspend，他们实现线程控制的方式都是**使得当前执行的线程暂停**，试想当调用Thread.sleep(),Thread.yield()以及thread.suspend()的时候，调用这些方法的线程本身就是正在执行的线程啊，所以，这些方法的效果都是*让调用该方法的线程暂停*
+
 ---  
 ####线程暂停的实现  
 * **1. suspend()+resume()方法实现**  
@@ -174,14 +176,180 @@ java线程转换图：
 ###三 线程同步  
 由于多线程的并发操作，线程的同步就会出现问题，解决方法就是引入了**同步监视器和同步锁**：  
 ####3.1 synchronized关键字  
-#####3.1.1 同步代码块    
+
+**同步关键字synchronized用于对共享资源的修饰，如果不是共享资源，没有必要使用同步关键字。**
+##### 3.1.1 同步方法  
+
+同步方法是指一个方法用synchronize修饰，这样的话**同步锁就是该类的一个实例对象**：
+
+	class MyObject{
+		synchronized public void method() throws InterruptedException{
+			System.out.println("当前执行的线程是："+Thread.currentThread().getName());
+			Thread.sleep(500);
+			System.out.println("从"+Thread.currentThread().getName()+"线程处返回");
+		}
+	}
+	class MyThreadA extends Thread{
+		private MyObject o;
+		MyThreadA(MyObject o){
+			this.o=o;
+		}
+		
+		public void run(){
+			try {
+				o.method();
+			} catch (InterruptedException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		}
+	}
+	
+	class MyThreadB extends Thread{
+		private MyObject o;
+		MyThreadB(MyObject o){
+			this.o=o;
+		}
+		
+		public void run(){
+			try {
+				o.method();
+			} catch (InterruptedException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		}
+	}
+	
+	public class Run{
+		public static void main(String[] args){
+			MyObject o=new MyObject();
+			MyThreadA thread=new MyThreadA(o);
+			thread.start();
+			MyThreadB threadb=new MyThreadB(o);
+			threadb.start();
+		}
+	}  
+	--------
+	输出：
+		当前执行的线程是：Thread-0
+		从Thread-0线程处返回
+		当前执行的线程是：Thread-1
+		从Thread-1线程处返回  
+
+从输出的结果来看，虽然thread-0中间有调用sleep(500)但是thread-1并没有执行o.method()方法，从而实现了方法的同步调用。  
+
+而synchronized关键字的同步锁必须是同一个对象才能够约束住多线程，如果将main方法改成下面这样，结果就不一样了：
+
+	public class Run{
+		public static void main(String[] args){
+			MyObject o=new MyObject();
+			MyThreadA thread=new MyThreadA(o);
+			thread.start();
+			MyThreadB threadb=new MyThreadB(new MyObject());
+			threadb.start();
+		}
+	}
+	----
+	当前执行的线程是：Thread-0
+	当前执行的线程是：Thread-1
+	从Thread-0线程处返回
+	从Thread-1线程处返回  
+
+而synchronized关键字也可以作用到静态方法上，意思就是为Class上锁，Class锁可以对类的所有对象的实例起作用。  
+
+	class MyObject{
+		synchronized public static void methodA() throws InterruptedException{
+			System.out.println("当前执行的线程是："+Thread.currentThread().getName());
+			Thread.sleep(500);
+			System.out.println("从"+Thread.currentThread().getName()+"线程处返回");
+		}
+		synchronized public static void methodB() throws InterruptedException{
+			System.out.println("当前执行的线程是："+Thread.currentThread().getName());
+			System.out.println("从"+Thread.currentThread().getName()+"线程处返回");
+		}
+		synchronized public void methodC(){
+			System.out.println("当前执行的线程是："+Thread.currentThread().getName());
+			System.out.println("从"+Thread.currentThread().getName()+"线程处返回");
+		}
+	}
+	class MyThreadA extends Thread{
+		private MyObject o;
+		MyThreadA(MyObject o){
+			this.o=o;
+		}
+		
+		public void run(){
+			try {
+				o.methodA();
+			} catch (InterruptedException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		}
+	}
+	
+	class MyThreadB extends Thread{
+		private MyObject o;
+		MyThreadB(MyObject o){
+			this.o=o;
+		}
+		
+		public void run(){
+			try {
+				o.methodB();
+			} catch (InterruptedException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		}
+	}
+	
+	class MyThreadC extends Thread{
+		private MyObject o;
+		MyThreadC(MyObject o){
+			this.o=o;
+		}
+		
+		public void run(){
+				o.methodC();
+		}
+	}
+	
+	
+	public class Run{
+		public static void main(String[] args){
+			MyObject o=new MyObject();
+			MyThreadA thread=new MyThreadA(o);
+			thread.start();
+			MyThreadB threadb=new MyThreadB(new MyObject());
+			threadb.start();
+			MyThreadC threadc=new MyThreadC(o);
+			threadc.start();
+		}
+	}  
+	------  
+	当前执行的线程是：Thread-0
+	当前执行的线程是：Thread-2
+	从Thread-2线程处返回
+	从Thread-0线程处返回
+	当前执行的线程是：Thread-1
+	从Thread-1线程处返回  
+
+可以看到，即使threadb和threada传入的对象不一样，这两个线程调用的方法也不是同一个方法，但是他们两个的调用顺序也是同步的；而threadc和threada传入的对象时同一个，但是他们的调用是异步的。就是因为threada和threadb调用的都是static方法，所以**即使threadb传入的对象和threada传入的对象不是同一个，那也没什么帮助，因为他们两个的同步锁是Class类**；但是threadc调用的是一个对象级别的锁，所以和threada就发生了异步情况
+
+> 另外，synchronized的同步锁具有**重入性，意思就是当一个线程得到一个对象锁后，再次请求此对象锁时是可以得到该对象的锁的，也就是说在synchronized修饰的方法内部还可以调用另一个synchronized修饰的方法。**否则的话会发生死锁（持有锁，但是却在同一个对象的另一个synchronized方法的等待队列里面等待）。
+> **可重入锁支持在子类的synchronized方法中调用父类的synchronized方法。**
+
+
+#####3.1.2 同步代码块    
 		synchronized（obj）{
 			...  
 			//此处的代码块就是同步代码块 
 		}  
-synchronized后面括号中的obj就是**同步监视器**，上面代码的含义是：线程开始执行同步代码块之前，必须先获得**对同步监视器的锁定**。在多线程并发操作临界区（共享资源）的时候，任意时刻只有一个线程可以获得对同步监视器的锁定，**当同步代码块执行完毕后释放锁定**。  
-#####3.1.2 同步代码块  
-就是用synchronized关键字修饰**实例方法**，这种情况下**同步方法的同步监视器是this，也就是调用方法的对象**。  
+synchronized后面括号中的obj就是**同步监视器**，上面代码的含义是：线程开始执行同步代码块之前，必须先获得**对同步监视器的锁定**。在多线程并发操作临界区（共享资源）的时候，任意时刻只有一个线程可以获得对同步监视器的锁定，**当同步代码块执行完毕后释放锁定**。如果想像同步方法一样让类的对象作为同步监视器，那么**括号中就填this**；同样，如果**括号中的是一个XXX.class那么就和类同步方法一样了**。同步代码块儿就像是**一半同步，一半异步**的类的实例方法一样。  
+和同步方法一样，如果不同调用对应的对象不同则就是两个不同的同步监视器，并不会产生同步效果；只有对应的对象相同，才会产生同步效果。
+
 ####3.2 同步锁  
 同步锁需要显示定义一个Lock对象，**每次只能有一个线程对Lock对象加锁**，线程开始访问共享资源之前必须获得Lock对象。Lock与ReadWriteLock（读写锁）是两个**根接口**。ReentrantLock（可重入锁，可以嵌套似的加锁）和ReentrantReadWriteLock分别是两个的实现类。  
 
@@ -269,75 +437,124 @@ join方法也可以实现线程通信
 * 调用的线程不清除状态标识  
 isInterrupted(boolean):带参数的方法，参数表示是否清除状态标识，false标识不清除，true标识清除  
 ####5.4 interrupted方法    
-返回当前正在执行的线程是否处于中断状态，**底层是currentThread().isInterrupted(false);**所以这个判断的是当前正在执行的线程的状态，也就是 Thread1.interrupted（）方法调用后可能返回的是Thread2是否处于中断状态的布尔值。  
+返回当前正在执行的线程是否处于中断状态，**底层是currentThread().isInterrupted(false);**所以这个判断的是当前正在执行的线程的状态，也就是 Thread1.interrupted（）方法调用后可能返回的是Thread2是否处于中断状态的布尔值，如果是当前线程自己执行该方法，那么就一定返回的true了。  
 ####5.5 中断线程的方法 
 **interrupt()方法调用后只是更改了那个布尔值，只是建议中断该线程，并没有真的为我们实现中断** 
 #####5.5.1 异常法  
 线程在抛出异常后会主动终止，所以该方法就是手动抛出异常  
 
-		//直接选择在run方法中抛出异常，从而停止线程
-		Thread t2 = new Thread(new Runnable() {
-    		@Override
-    		public void run() {
-       		 try {
-           		 throw new InterruptedException();//主动抛出异常
-        	} catch (InterruptedException e) {
-          	  System.out.println("成功捕获 InterruptedException异常");
-           	 e.printStackTrace();
-       		 }
-   		 	}
-		},"kira");
-		t2.start();
-		t2.interrupt();
-		-------------
-		//输出：成功捕获 InterruptedException异常
-		//打印：java.lang.InterruptedException  
-#####5.5.2 沉睡法  
-利用interrupt方法中的*若当前线程已经被Object.wait()，Thread的join(),sleep方法阻塞，则调用该方法会抛出异常*，在沉睡中调用interrupt方法，让其抛出异常 
- 
-		//沉睡
-		Thread t2 = new Thread(new Runnable() {
-    		@Override
-    		public void run() {
-        		try {
-         			   Thread.sleep(1000);//沉睡
-       			 } catch (InterruptedException e) {
-           			 System.out.println("在沉睡中 成功捕获 InterruptedException异常");
-            		e.printStackTrace();
-       			 }
-   			 }
-			},"kira");
-		t2.start();
-		t2.interrupt();
-		-------------
-		//输出：在沉睡中 成功捕获 InterruptedException异常
-		//打印：java.lang.InterruptedException: sleep interrupted  
-#####5.5.3 Return法  
-		//j将interrupt方法与return结合使用也能停止线程
-		Thread t2 = new Thread(new Runnable() {
-			@Override
-			public void run() {
-    			int i = 0;
-    			while (true){
-        			if (Thread.currentThread().isInterrupted()){
-            			System.out.println("停止");
-            			return;
-        			}
-        		System.out.println(System.currentTimeMillis());
-    		}
+	class MyThread extends Thread{
+		public void run(){
+			super.run();
+			try{
+				for (int i=0;i<5000000;i++){
+					if (this.interrupted()){
+						System.out.println("已经是停止状态了！我要退出了！当前的i为"+i);
+						throw new InterruptedException();
+					}
+				}
+			}catch(InterruptedException e){
+				System.out.print("进入MyThead.java类run方法中的catch了");
+				e.printStackTrace();
+			}
 		}
-		},"kira");
-		t2.start();
-		Thread.sleep(1000);
-		t2.interrupt();
+	}
+	
+	public class Run{
+		public static void main(String[] args) throws InterruptedException{
+			MyThread thread=new MyThread();
+			thread.start();
+			Thread.sleep(5);
+			thread.interrupt();
+			System.out.println("执行完interrupt了，end");
+		}
+	}
+		-------------
+		//执行完interrupt了，end
+		已经是停止状态了！我要退出了！当前的i为147312
+		进入MyThead.java类run方法中的catch了java.lang.InterruptedException
+			at MyThread.run(Run.java:22) 
+#####5.5.2 沉睡法  
+利用interrupt方法中的**若当前线程已经被Object.wait()，Thread的join(),sleep方法阻塞，则调用该方法会抛出异常**，在沉睡中调用interrupt方法，让其抛出异常 
+ 
+	class MyThread extends Thread{
+		public void run(){
+			super.run();
+			try{
+				System.out.println("MyThread的run方法开始了");
+				Thread.sleep(2000);
+			}catch(InterruptedException e){
+				System.out.print("进入MyThead.java类run方法中的catch了,在沉睡中被中断发生异常");
+				e.printStackTrace();
+			}
+		}
+	}
+	
+	public class Run{
+		public static void main(String[] args){
+			MyThread thread=new MyThread();
+			thread.start();
+			try {
+				Thread.sleep(5);
+				thread.interrupt();
+			} catch (InterruptedException e) {
+				System.out.println("main方法中的catch块儿，thread中断异常");
+				e.printStackTrace();
+			}
+			
+			System.out.println("执行完interrupt了，end");
+		}
+	}
+		-------------
+		//输出：MyThread的run方法开始了
+			执行完interrupt了，end
+			进入MyThead.java类run方法中的catch了,在沉睡中被中断发生异常java.lang.InterruptedException: sleep interrupted
+				at java.lang.Thread.sleep(Native Method)
+				at MyThread.run(Run.java:20)  
+
+而且可以看到，是在线程的run方法中捕获了异常。
+			  
+#####5.5.3 Return法  
+	class MyThread extends Thread{
+		public void run(){
+			super.run();
+				while(true){
+					System.out.println("正在执行");
+					if (this.interrupted()){
+						System.out.println("停止了");
+						return;
+					}
+				}
+		}
+	}
+	
+	public class Run{
+		public static void main(String[] args){
+			MyThread thread=new MyThread();
+			thread.start();
+			try {
+				Thread.sleep(50);
+				thread.interrupt();
+			}catch(InterruptedException e){
+				e.printStackTrace();
+			}
+			System.out.println("执行完interrupt了，end");
+		}
+	}
 		-------------
 		//输出：
-		.....
-		1502463392035
-		1502463392035
-		1502463392035
-		停止
-		//然后就停止打印了  
+		正在执行
+		正在执行
+		正在执行
+		正在执行
+		正在执行
+		正在执行
+		正在执行
+		正在执行
+		正在执行
+		停止了
+		执行完interrupt了，end  
+
 从我们以上实现中断的方法来看，中断了的线程和暂停时不一样的，中断了的线程是没法主动的进入到就绪或者运行态了，这算是**中断和暂停的区别来看待**    
 
 ### 六、线程通信再学习  
