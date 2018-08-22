@@ -736,4 +736,491 @@ isInterrupted(boolean):带参数的方法，参数表示是否清除状态标识
 
 >join的源码非常简单，是用wait实现的；猜测：比如在main线程中新建一个t线程，调用t.join()，则对应的源码中wait()的调用者是main线程，而不是t线程。  
 
-> **综上所述：能够释放锁的只有yield方法和Object.wait()方法。**
+> **综上所述：能够释放锁的只有yield方法和Object.wait()方法。**  
+
+## 线程池  
+> 主要参考链接：[https://www.zybuluo.com/kiraSally/note/990993](https://www.zybuluo.com/kiraSally/note/990993)  
+
+### 1. 线程池是如何按照原理实现的  
+原理图：  
+
+![](http://static.zybuluo.com/kiraSally/9mmvv0fwbyf6exxmk68p70yz/%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20171219150356.jpg)  
+
+#### 1.1 提交任务与执行  
+任务的提交是在**execute()方法**(当然还有submit方法)中完成的。首先，按照流程图，提交一个任务后需要先判断是否满足**核心池容量约束**：  
+
+	/**
+         * 情况一：当实际工作线程数 < 核心工作线程数时
+         * 执行方案：会创建一个新的工作线程去执行该任务
+         * 注意：此时即使有其他空闲的工作线程也还是会新增工作线程，
+         *      直到达到核心工作线程数为止
+         */
+        if (workerCountOf(c) < corePoolSize) {
+            /**
+             * 新增工作线程，true表示要对比的是核心工作线程数
+             * 一旦新增成功就开始执行当前任务
+             * 期间也会通过自旋获取队列任务进行执行
+             */
+            if (addWorker(command, true))
+                return;
+            /**
+             * 需要重新获取控制器状态，说明新增线程失败
+             * 线程失败的原因可能有两种：
+             *  - 1.线程池已被关闭，非RUNNING状态的线程池是不允许接收新任务的
+             *  - 2.并发时，假如都通过了workerCountOf(c) < corePoolSize校验，但其他线程
+             *      可能会在addWorker先创建出线程，导致workerCountOf(c) >= corePoolSize，
+             *      即实际工作线程数 >= 核心工作线程数，此时需要进入情况二
+             */
+            c = ctl.get();
+        }  
+
+以上是execute源码的片段，很明显这第一种情况就是流程图中的**核心池未满**的情况，注意其中说明的添加任务失败的情况，情况一很明了，情况二需要提醒的是**只有其他地方的并发操作导致了核心池的容量约束被破坏了addWork才会返回false，如果只是并发提前添加了一个word但是并没有破坏核心池的容量约束的话，在addWork源码(下面会说到)内部会继续进行添加work的操作**  
+
+对于核心池未满的情况，确实做了相应的处理，接下来看看需要入队的情况：  
+
+	/**
+         * 情况二：当实际工作线程数>=核心线程数时，新提交任务需要入队
+         * 执行方案：一旦入队成功，仍需要处理线程池状态突变和工作线程死亡的情况
+         */
+        if (isRunning(c) && workQueue.offer(command)) {
+            //双重校验
+            int recheck = ctl.get();
+            /**
+             * recheck的目的是为了防止线程池状态的突变 - 即被关闭
+             * 一旦线程池非RUNNING状态时，除了从队列中移除该任务(回滚)外
+             * 还需要执行任务拒绝策略处理新提交的任务
+             */
+            if (!isRunning(recheck) && remove(command))
+                //执行任务拒绝策略
+                reject(command);
+            /**
+             * 若线程池还是RUNNING状态 或 队列移除失败(可能正好被一个工作线程拿到处理了)
+             * 此时需要确保至少有一个工作线程还可以干活
+             * 补充一句：之所有无须与核心工作线程数或最大线程数相比，而只是比较0的原因是
+             *          只要保证有一个工作线程可以干活就行，它会自动去获取任务
+             */
+            else if (workerCountOf(recheck) == 0)
+                /**
+                 * 若工作线程都已死亡，需要新增一个工作线程去干活
+                 * 死亡原因可能是线程超时或者异常等等复杂情况
+                 *
+                 * 第一个参数为null指的是传入一个空任务，
+                 * 目的是创建一个新工作线程去处理队列中的剩余任务
+                 * 第二个参数为false目的是提示可以扩容到最大工作线程数
+                 */
+                addWorker(null, false);
+        }  
+
+根据if的条件可以看出，如果**workQueue.offer(command)**通过就说明队列没有满，这时候就将**任务入队**了，**符合流程图**，然后进入了if块儿中进行**双重校验**。第一个校验很容易理解，可是当if条件没有被选择的时候(也就是注释中说的**若线程池还是RUNNING状态 或 队列移除失败(可能正好被一个工作线程拿到处理了)**)为什么还要判断一下else if的条件？  
+
+接下来是第三个情况，**最大线程池容量约束：**  
+
+	/**
+         * 情况三：一旦线程池被关闭 或者 新任务入队失败(队列已满)
+         * 执行方案：会尝试创建一个新的工作线程，并允许扩容到最大工作线程数
+         * 注意：一旦创建失败，比如超过最大工作线程数，需要执行任务拒绝策略
+         */
+        else if (!addWorker(command, false))
+            //执行任务拒绝策略
+            reject(command);  
+
+很简单的逻辑，如果添加失败就执行拒绝操作。  
+
+上面的约束中，**核心池容量约束**和**最大线程池容量约束**的处理代码中都涉及到了**addWork**的调用，但是addWork在什么时候才能真正被添加呢(该方法返回true)？接下来就看看该方法的源码：  
+
+	/**
+	 * 新增工作线程需要遵守线程池控制状态规定和边界限制
+	 *
+	 * @param core core为true时允许扩容到核心工作线程数，否则为最大工作线程数
+	 * @return 新增成功返回true，失败返回false
+	 */
+	private boolean addWorker(Runnable firstTask, boolean core) {
+	    //重试标签
+	    retry:
+	    /***
+	     * 外部自旋 -> 目的是确认是否能够新增工作线程
+	     * 允许新增线程的条件有两个：
+	     *   1.满足线程池状态条件 -> 条件一
+	     *   2.实际工作线程满足数量边界条件 -> 条件二
+	     * 不满足条件时会直接返回false，表示新增工作线程失败
+	     */
+	    for (;;) {
+	        //读取原子控制量 - 包含workerCount(实际工作线程数)和runState(线程池状态)
+	        int c = ctl.get();
+	        //读取线程池状态
+	        int rs = runStateOf(c);
+	        /**
+	         * 条件一.判断是否满足线程池状态条件
+	         *  1.只有两种情况允许新增线程：
+	         *    1.1 线程池状态==RUNNING
+	         *    1.2 线程池状态==SHUTDOWN且firstTask为null同时队列非空
+	         *
+	         *  2.线程池状态>=SHUTDOWN时不允许接收新任务，具体如下：
+	         *    2.1 线程池状态>SHUTDOWN，即为STOP、TIDYING、TERMINATED
+	         *    2.2 线程池状态==SHUTDOWN，但firstTask非空
+	         *    2.3 线程池状态==SHUTDOWN且firstTask为空，但队列为空
+	         *  补充：针对1.2、2.2、2.3的情况具体请参加后面的"小问答"环节
+	         */
+	        if (rs >= SHUTDOWN &&
+	            !(rs == SHUTDOWN && firstTask == null && ! workQueue.isEmpty()))
+	            return false;
+	        /***
+	         * 内部自旋 -> 条件二.判断实际工作线程数是否满足数量边界条件
+	         *   -数量边界条件满足会对尝试workerCount实现CAS自增，否则新增失败
+	         *   -当CAS失败时会再次重新判断是否满足新增条件：
+	         *       1.若此期间线程池状态突变(被关闭)，重新判断线程池状态条件和数量边界条件
+	        *        2.若此期间线程池状态一致，则只需重新判断数量边界条件
+	        */
+	        for (;;) {
+	            //读取实际工作线程数
+	            int wc = workerCountOf(c);
+	            /**
+	             * 新增工作线程会因两种实际工作线程数超标情况而失败：
+	             *  1.实际工作线程数 >= 最大容量
+	             *  2.实际工作线程数 > 工作线程比较边界数(当前最大扩容数)
+	             *   -若core = true，比较边界数 = 核心工作线程数
+	             *   -若core = false，比较边界数 = 最大工作线程数
+	             */
+	            if (wc >= CAPACITY || wc >= (core ? corePoolSize : maximumPoolSize))
+	                return false;
+	            /**
+	             * 实际工作线程计数CAS自增:
+	             *   1.一旦成功直接退出整个retry循环，表明新增条件都满足
+	             *   2.因并发竞争导致CAS更新失败的原因有三种: 
+	             *      2.1 线程池刚好已新增一个工作线程
+	             *        -> 计数增加，只需重新判断数量边界条件
+	             *      2.2 刚好其他工作线程运行期发生错误或因超时被回收
+	             *        -> 计数减少，只需重新判断数量边界条件
+	             *      2.3 刚好线程池被关闭 
+	             *        -> 计数减少，工作线程被回收，
+	             *           需重新判断线程池状态条件和数量边界条件
+	             */
+	            if (compareAndIncrementWorkerCount(c))
+	                break retry;
+	            //重新读取原子控制量 -> 原因是在此期间可能线程池被关闭了
+	            c = ctl.get();
+	            /**
+	             * 快速检测是否发生线程池状态突变
+	             *  1.若状态突变，重新判断线程池状态条件和数量边界条件
+	             *  2.若状态一致，则只需重新判断数量边界条件
+	             */
+	            if (runStateOf(c) != rs)
+	                continue retry;
+	        }
+	    }
+	    /**
+	     * 这里是addWorker方法的一个分割线
+	     * 前面的代码的作用是决定了线程池接受还是拒绝新增工作线程
+	     * 后面的代码的作用是真正开始新增工作线程并封装成Worker接着执行后续操作
+	     * PS:虽然笔者觉得这个方法其实可以拆分成两个方法的(在break retry的位置)
+	     */
+	    //记录新增的工作线程是否开始工作
+	    boolean workerStarted = false;
+	    //记录新增的worker是否成功添加到workers集合中
+	    boolean workerAdded = false;
+	    Worker w = null;
+	    try {
+	        //将新提交的任务和当前线程封装成一个Worker
+	        w = new Worker(firstTask);
+	        //获取新创建的实际工作线程
+	        final Thread t = w.thread;
+	        /**
+	         * 检测是否有可执行任务的线程，即是否成功创建了新的工作线程
+	         *   1.若存在，则选择执行任务
+	         *   2.若不存在，则需要执行addWorkerFailed()方法
+	         */
+	        if (t != null) {
+	            /**
+	             * 新增工作线程需要加全局锁
+	             * 目的是为了确保安全更新workers集合和largestPoolSize
+	             */
+	            final ReentrantLock mainLock = this.mainLock;
+	            mainLock.lock();
+	            try {
+	                /**
+	                 * 获得全局锁后，需再次检测当前线程池状态
+	                 * 原因在于预防两种非法情况：
+	                 *  1.线程工厂创建线程失败
+	                 *  2.在锁被获取之前，线程池就被关闭了
+	                 */
+	                int rs = runStateOf(ctl.get());
+	                /**
+	                 * 只有两种情况是允许添加work进入works集合的
+	                 * 也只有进入workers集合后才是真正的工作线程，并开始执行任务
+	                 *  1.线程池状态为RUNNING(即rs<SHUTDOWN)
+	                 *  2.线程池状态为SHUTDOWN且传入一个空任务
+	                 *  (理由参见：小问答之快速检测线程池状态?) 
+	                 */
+	                if (rs < SHUTDOWN ||
+	                    (rs == SHUTDOWN && firstTask == null)) {
+	                    /**
+	                     * 若线程处于活动状态时，说明线程已启动，需要立即抛出"线程状态非法异常"
+	                     * 原因是线程是在后面才被start的，已被start的不允许再被添加到workers集合中
+	                     * 换句话说该方法新增线程时，而线程是新的，本身应该是初始状态(new)
+	                     * 可能出现的场景：自定义线程工厂newThread有可能会提前启动线程
+	                     */
+	                    if (t.isAlive())
+	                        throw new IllegalThreadStateException();
+	                    //由于加锁，所以可以放心的加入集合
+	                    workers.add(w);
+	                    int s = workers.size();
+	                    //更新最大工作线程数，由于持有锁，所以无需CAS
+	                    if (s > largestPoolSize)
+	                        largestPoolSize = s;
+	                    //确认新建的worker已被添加到workers集合中  
+	                    workerAdded = true;
+	                }
+	            } finally {
+	                //千万不要忘记主动解锁
+	                mainLock.unlock();
+	            }
+	            /**
+	             * 一旦新建工作线程被加入工作线程集合中，就意味着其可以开始干活了
+	             * 有心的您肯定发现在线程start之前已经释放锁了
+	             * 原因在于一旦workerAdded为true时，说明锁的目的已经达到
+	             * 根据最小化锁作用域的原则，线程执行任务无须加锁，这是种优化
+	             * 也希望您在使用锁时尽量保证锁的作用域最小化
+	             */
+	            if (workerAdded) {
+	                /**
+	                 * 启动线程，开始干活啦
+	                 * 若您看过笔者的"并发番@Thread一文通"肯定知道start()后，
+	                 * 一旦线程初始化完成便会立即调用run()方法
+	                 */
+	                t.start();
+	                //确认该工作线程开始干活了
+	                workerStarted = true;
+	            }
+	        }
+	    } finally {
+	        //若新建工作线程失败或新建工作线程后没有成功执行，需要做新增失败处理
+	        if (!workerStarted)
+	            addWorkerFailed(w);
+	    }
+	    //返回结果表明新建的工作线程是否已启动执行
+	    return workerStarted;
+	}  
+
+这就来简单的捋一捋：这个方法看成两个部分，第一部分由两个循环组成，目的是判断是否满足新增一个Work的条件，如果不满足就直接return false了，也就没有第二部分什么事儿了；第二部分的作用是如果满足新增线程的条件，那就开始干吧！  
+
+第一部分很容易理解，第二部分有一点需要注意，那就是在真正的往works中添加线程的时候(也就是正在工作线程数加一)的时候是**获取了全局锁的**。而且，这个方法返回true的时候新加入的线程已将调用了start方法了。  
+
+### 2. 线程池是如何实现线程复用的  
+使用线程池的一大目的是为了实现线程的复用来节省开销，那么线程池是如何实现复用的呢？  
+首先，看看work是如何实现run方法的：  
+
+	/**
+	 * 工作线程运行
+	 * runWorker方法内部会通过轮询的方式
+	 * 不停地获取任务和执行任务直到线程被回收
+	 */
+	public void run() {
+	    runWorker(this);
+	}  
+runWorker方法又是如何实现的呢？  
+
+	final void runWorker(Worker w) {
+	    //读取当前线程 -即调用execute()方法的线程(一般是主线程)
+	    Thread wt = Thread.currentThread();
+	    //读取待执行任务
+	    Runnable task = w.firstTask;
+	    //清空任务 -> 目的是用来接收下一个任务
+	    w.firstTask = null;
+	    /**
+	     * 注意Worker本身也是一把不可重入的互斥锁！
+	     * 由于Worker初始化时state=-1，因此此处的解锁的目的是：
+	     * 将state-1变成0，因为只有state>=0时才允许中断；
+	     * 同时也侧面说明在worker调用runWorker()之前是不允许被中断的，
+	     * 即运行前不允许被中断
+	     */
+	    w.unlock();
+	    //记录是否因异常/错误突然完成，默认有异常/错误发生
+	    boolean completedAbruptly = true;
+	    try {
+	        /**
+	         * 获取任务并执行任务，取任务分两种情况：
+	         *   1.初始任务：Worker被初始化时赋予的第一个任务(firstTask)
+	         *   2.队列任务：当firstTask任务执行好后，线程不会被回收，而是之后自动自旋从任务队列中取任务(getTask)
+	         *     此时即体现了线程的复用
+	         */
+	        while (task != null || (task = getTask()) != null) {
+	            /**
+	             * Worker加锁的目的是为了在shutdown()时不要立即终止正在运行的worker，
+	             * 因为需要先持有锁才能终止，而不是为了处理并发情况(注意不是全局锁)
+	             * 在shutdownNow()时会立即终止worker，因为其无须持有锁就能终止
+	             * 关于关闭线程池下文会再具体详述
+	             */
+	            w.lock();
+	            /**
+	             * 当线程池被关闭且主线程非中断状态时，需要重新中断它
+	             * 由于调用线程一般是主线程，因此这里是主线程代指调用线程
+	             */
+	            if ((runStateAtLeast(ctl.get(), STOP) ||
+	                 (Thread.interrupted() &&
+	                    runStateAtLeast(ctl.get(), STOP))) &&
+	                        !wt.isInterrupted())
+	                wt.interrupt();
+	            try {
+	                /**
+	                 * 每个任务执行前都会调用"前置方法"，
+	                 * 在"前置方法"可能会抛出异常，
+	                 * 结果是退出循环且completedAbruptly=true，
+	                 * 从而线程死亡，任务未执行(并被丢弃)
+	                 */
+	                beforeExecute(wt, task);
+	                Throwable thrown = null;
+	                try {
+	                    //执行任务
+	                    task.run();
+	                } catch (RuntimeException x) {
+	                    thrown = x; throw x;
+	                } catch (Error x) {
+	                    thrown = x; throw x;
+	                } catch (Throwable x) {
+	                    thrown = x; throw new Error(x);
+	                } finally {
+	                    /**
+	                     * 任务执行结束后，会调用"后置方法"
+	                     * 该方法也可能抛异常从而导致线程死亡
+	                     * 但值得注意的是任务已经执行完毕
+	                     */
+	                    afterExecute(task, thrown);
+	                }
+	            } finally {
+	                //清空任务 help gc
+	                task = null;
+	                //无论成功失败任务数都要+1，由于持有锁所以无须CAS
+	                w.completedTasks++;
+	                //必须要主动释放锁
+	                w.unlock();
+	            }
+	        }
+	        //无异常时需要清除异常状态
+	        completedAbruptly = false;
+	    } finally {
+	        /**
+	         * 工作线程退出循环的原因有两个：
+	         *  1.因意外的错误/异常退出
+	         *  2.getTask()返回空 -> 原因有四种，下文会详述
+	         * 工作线程退出循环后，需要执行相对应的回收处理
+	         */
+	        processWorkerExit(w, completedAbruptly);
+	    }
+	}  
+
+结合注释也能看懂，真正实现复用的是醒目的**while循环中的task.run()**，而当**getTask()不为空**的时候while循环就没可能停下来，也就是说只要任务对列中还有任务，那么这个线程就会一直从里面取出来执行。  
+
+同样**getTask()**也是由很多的约束的：  
+
+	private Runnable getTask() {
+	    // 记录任务队列的poll()是否超时，默认未超时
+	    boolean timedOut = false; 
+	    //自旋获取任务
+	    for (;;) {
+	        /**
+	         * 线程池会依次判断五种情况，满足任意一种就返回null：
+	         *    1.线程池被关闭，状态为(STOP || TIDYING || TERMINATED)
+	         *    2.线程池被关闭，状态为SHUTDOWN且任务队列为空
+	         *    3.实际工作线程数超过最大工作线程数
+	         *    4.工作线程满足超时条件后，同时符合下述的任意一种情况：
+	         *      4.1 线程池中还存在至少一个其他可用的工作线程
+	         *      4.2 线程池中已没有其他可用的工作线程但任务队列为空
+	         */
+	        int c = ctl.get();
+	        int rs = runStateOf(c);
+	        /**
+	         * 判断线程池状态条件，有两种情况直接返回null
+	         *  1.线程池状态大于SHUTDOWN(STOP||TIDYING||TERMINATED)，说明不允许再执行任务
+	         *    - 因为>=STOP以上状态时不允许接收新任务同时会中断正在执行中的任务，任务队列的任务也不执行了         
+	         *  
+	         *  2.线程池状态为SHUTDOWN且任务队列为空，说明已经无任务可执行
+	         *    - 因为SHUTDOWN时还需要执行任务队列的剩余任务，只有当无任务才可退出
+	         */
+	        if (rs >= SHUTDOWN && (rs >= STOP || workQueue.isEmpty())) {
+	            /**
+	             * 减少一个工作线程数
+	             * 值得注意的是工作线程的回收是放在processWorkerExit()中进行的
+	             * decrementWorkerCount()方法是内部不断循环执行CAS的，保证最终一定会成功
+	             * 补充：因线程池被关闭而计数减少可能与addWorker()的
+	             *      计数CAS自增发生并发竞争
+	             */
+	            decrementWorkerCount();
+	            return null;
+	        }
+	        //读取实际工作线程数
+	        int wc = workerCountOf(c);
+	        /**
+	         * 判断是否需要处理超时：
+	         *   1.allowCoreThreadTimeOut = true 表示需要回收空闲超时的核心工作线程
+	         *   2.wc > corePoolSize 表示存在空闲超时的非核心工作线程需要回收
+	         */
+	        boolean timed = allowCoreThreadTimeOut || wc > corePoolSize;
+	         /**
+	          * 有三种情况会实际工作线程计数-1且直接返回null
+	          *
+	          *    1.实际工作线程数超过最大线程数
+	          *    2.该工作线程满足空闲超时条件需要被回收：
+	          *       2.1 当线程池中还存在至少一个其他可用的工作线程
+	          *       2.2 线程池中已没有其他可用的工作线程但任务队列为空
+	          *  
+	          * 结合2.1和2.2我们可以推导出：
+	          *
+	          *   1.当任务队列非空时，线程池至少需要维护一个可用的工作线程，
+	          *     因此此时即使该工作线程超时也不会被回收掉而是继续获取任务
+	          *
+	          *   2.当实际工作线程数超标或获取任务超时时，线程池会因为
+	          *     一直没有新任务可执行，而逐渐减少线程直到核心线程数为止；
+	          *     若设置allowCoreThreadTimeOut为true，则减少到1为止；
+	          *
+	          * 提示：由于wc > maximumPoolSize时必定wc > 1，因此无须比较
+	          * (wc > maximumPoolSize && workQueue.isEmpty()) 这种情况
+	          */
+	        if ((wc > maximumPoolSize || (timed && timedOut))
+	            && (wc > 1 || workQueue.isEmpty())) {
+	            /**
+	             * CAS失败的原因还是出现并发竞争，具体参考上文
+	             * 当CAS失败后，说明实际工作线程数已经发生变化，
+	             * 必须重新判断实际工作线程数和超时情况
+	             * 因此需要countinue
+	             */
+	            if (compareAndDecrementWorkerCount(c))
+	                return null;
+	           /**        
+	            */                
+	            continue;
+	        }
+	        //若满足获取任务条件，根据是否需要超时获取会调用不同方法
+	        try {
+	           /**
+	            * 从任务队列中取任务分两种：
+	            *  1.timed=true 表明需要处理超时情况
+	            *   -> 调用poll()，超过keepAliveTime返回null
+	            *  2.timed=fasle 表明无须处理超时情况
+	            *   -> 调用take()，无任务则挂起等待
+	            */
+	            Runnable r = timed ?
+	                workQueue.poll(keepAliveTime, TimeUnit.NANOSECONDS) :
+	                workQueue.take();
+	            //一旦获取到任务就返回该任务并退出循环
+	            if (r != null)
+	                return r;
+	            //当任务为空时说明poll超时
+	            timedOut = true;
+	            /**
+	             * 关于中断异常获取简单讲一些超出本章范畴的内容
+	             * take()和poll(long timeout, TimeUnit unit)都会throws InterruptedException
+	             * 原因在LockSupport.park(this)不会抛出异常但会响应中断；
+	             * 但ConditionObject的await()会通过reportInterruptAfterWait()响应中断
+	             * 具体内容笔者会在阻塞队列相关番中进一步介绍
+	             */
+	        } catch (InterruptedException retry) {
+	            /**
+	             * 一旦该工作线程被中断，需要清除超时标记
+	             * 这表明当工作线程在获取队列任务时被中断，
+	             * 若您不对中断异常做任务处理，线程池就默认
+	             * 您希望线程继续执行，这样就会重置之前的超时标记
+	             */
+	            timedOut = false;
+	        }
+	    }
+	}
