@@ -148,7 +148,7 @@ HashMap作为我们常用的一个集合类，一直对它常用方法的实现�
 	    return null;
 	}
 
-> 分析：首先因为HashMap支持key为null，所以对key为null的情况进行单独的处理；put方法最终要的就是一般情况了：首先，基本思想是通过hash找到存放的地点，如果冲突则通过链表解决，我们来看看HashMap是如何实现的。**首先，根据key的求出对应的hash值，然后通过这个hash值映射到同的下标(int i=indexFor(hash,table.length)；**然后，在for循环中进入**table[i]处的链表进行查找**，如果有该key值则设置为newValue，并返回oldValue，否则调用**addEntry(hash,key,value,i)添加新的元素**  
+> 分析：首先因为HashMap支持key为null，所以对key为null的情况进行单独的处理；put方法最终要的就是一般情况了：首先，基本思想是通过hash找到存放的地点，如果冲突则通过链表解决，我们来看看HashMap是如何实现的。**首先，根据key的求出对应的hash值，然后通过这个hash值映射到同的下标(int i=indexFor(hash,table.length)；**然后，在for循环中进入**table[i]处的链表进行查找**，如果有该key值则设置为newValue，并返回oldValue，否则调用**addEntry(hash,key,value,i)添加新的元素**；值得注意的一点是：**用新的value替换老的value的前提是，这个key指向同一个引用域(或者equals方法自定义判断)，而且其hash值相等(index相等不代表hash相等)，因此这就解释了为甚自定义Class的时候其equals方法返回true的时候，hashCode必须相等，因为这样才能保证同一个key只能有一个(因为equals返回true说明是同一个key，只有hashCode相同才会进行覆盖，而不是添加新的)**  
 
 ### 2.2 hash方法  
 
